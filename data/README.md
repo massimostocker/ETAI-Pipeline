@@ -1,3 +1,4 @@
+Massimo Stocker 20260629
 # Dataset -- COMPAS Recidivism (ProPublica)
 
 ## The problem
