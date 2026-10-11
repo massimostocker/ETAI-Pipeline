@@ -13,7 +13,8 @@ cv:
   n_splits: 5
   shuffle: true
   random_state: 42
-  scoring: "balanced_accuracy"
+  scoring: "accuracy"
+  #options: accuracy, balanced_accuracy, f1, roc_auc
   n_jobs: 1                                         # -1 = all CPU cores
 
 diagnostics:
@@ -64,7 +65,7 @@ model:
   type: "decision_tree"                             
   params:
     random_state: 42
-    class_weight: balanced
+    
     
 
 
@@ -92,7 +93,7 @@ model:
 
 tuning:
   enabled: true
-  n_trials: 30
+  n_trials: 15
   n_splits: 5                                       # folds that score each candidate
   random_state: 42                                  # seeds the sampler and those folds
   # Keys are Pipeline parameter names. Types: int / float (low, high, log) or categorical (choices).
