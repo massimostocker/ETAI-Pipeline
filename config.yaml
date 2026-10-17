@@ -62,32 +62,40 @@ preprocessing:
     categorical_strategy: "most_frequent"
 
 model:
-  type: "decision_tree"                             
+  type: "adaboost"        # dummy | logistic_regression | decision_tree | random_forest | oblique_random_forest | adaboost
   params:
     random_state: 42
-    
-    
+    max_depth: 3            
+    n_estimators: 200
+    learning_rate: 1
 
-
-# model: type -> logistic_regression | decision_tree | random_forest
+# Params to swap in when changing model.type (ranges are what I use as sensible values):
 #
-# logistic_regression:
+# logistic_regression:   {max_iter: 2000}
 #   max_iter: 1000 ... 3000
-#   C: 0.01 ... 10              (smaller = stronger regularisation)
+#   C: 0.01 ... 10                (smaller = stronger regularisation)
 #   class_weight: null | balanced
 #
-# decision_tree:
+# decision_tree:         {random_state: 42}
 #   max_depth: 3 ... 15
 #   min_samples_leaf: 20 ... 200
 #   criterion: gini | entropy
 #   class_weight: null | balanced
 #
-# random_forest:
-#   n_estimators: 100 ... 400
+# random_forest:         {n_estimators: 200, random_state: 42, n_jobs: -1}
+#   n_estimators: 100 ... 400     (not tuned, more trees only cost time)
 #   max_depth: 5 ... 20
 #   min_samples_leaf: 5 ... 50
 #   max_features: sqrt | log2
 #   class_weight: null | balanced
+#
+# oblique_random_forest: {n_estimators: 200, n_components: 10, random_state: 42, n_jobs: -1}
+#   n_components: 3 ... 10        (random combinations of the features per tree)
+#
+# adaboost:              {max_depth: 1, n_estimators: 200, learning_rate: 1.0, random_state: 42}
+#   max_depth: 1 ... 8            (1 = stumps)
+#   n_estimators: 25 ... 400
+#   learning_rate: 0.01 ... 1.0
 
 
 
@@ -102,13 +110,20 @@ tuning:
       model__max_depth: {type: int, low: 1, high: 20}
       model__min_samples_leaf: {type: int, low: 1, high: 200, log: true}
       model__criterion: {type: categorical, choices: ["gini", "entropy"]}
-    # Extra search spaces (not in the class version) so the other models can be tuned too.
-    # random_forest is slow to tune: (5 + 1) x n_trials x 5 fits of a whole forest -- lower n_trials to try it.
+    # ensembles take minutes per run, so use a small n_trials while testing
     random_forest:
-      model__n_estimators: {type: int, low: 100, high: 500}
-      model__max_depth: {type: int, low: 2, high: 20}
-      model__min_samples_leaf: {type: int, low: 1, high: 100, log: true}
-      model__max_features: {type: categorical, choices: ["sqrt", "log2"]}
+      model__max_depth: {type: int, low: 2, high: 30}
+      model__min_samples_leaf: {type: int, low: 1, high: 200, log: true}
+      model__max_features: {type: categorical, choices: ["sqrt", 0.5, 1.0]}
+    oblique_random_forest:
+      model__estimator__tree__max_depth: {type: int, low: 2, high: 30}
+      model__estimator__tree__min_samples_leaf: {type: int, low: 1, high: 200, log: true}
+      model__estimator__project__n_components: {type: int, low: 3, high: 10}   # at most the number of features
+    adaboost:
+      model__estimator__max_depth: {type: int, low: 1, high: 8}
+      model__n_estimators: {type: int, low: 25, high: 400, log: true}
+      model__learning_rate: {type: float, low: 0.01, high: 1.0, log: true}
+    # my own addition, not from the class repo
     logistic_regression:
       model__C: {type: float, low: 0.001, high: 100, log: true}
 

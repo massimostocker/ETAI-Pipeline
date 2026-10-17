@@ -20,8 +20,8 @@ go on.
 ├── src/
 │   ├── data.py               # loading
 │   ├── preprocessing.py      # row-preserving cleaning (incl. domain-rule checks), training-only de-duplication, deployable preprocessing pipeline, and the split that locks the final test set away (week 4)
-│   ├── model.py               # model construction + build_pipeline(): preprocessing + model as one estimator (week 5)
-│   ├── evaluate.py           # stratified k-fold cross-validation, out-of-fold report + fairness check (week 4)
+│   ├── model.py               # model construction (incl. oblique random forest + AdaBoost, week 6) + build_pipeline(): preprocessing + model as one estimator (week 5)
+│   ├── evaluate.py           # stratified k-fold cross-validation, out-of-fold report + fairness check (week 4), paired test to compare two models (week 6)
 │   ├── tuning.py             # hyperparameter tuning with Optuna + nested cross-validation (week 5)
 │   └── results.py            # saves each run's report to disk
 ├── results/                  # created automatically -- one file per run (not tracked in git)
@@ -40,6 +40,7 @@ This table is updated after each practical class, so you can always see what cha
 | 3 | EDA + preprocessing -- diagnose the data, then fix it | `src/data_diagnostics.py` (missingness-mechanism test via chi-square + Cramér's V, domain-rule invalid-value detection, two-way duplicate check) and `src/preprocessing.py` (leak-safe category cleanup, mechanism-matched imputation with `_was_missing` indicators for MNAR columns, a deployable `ColumnTransformer`, **and** the train/test split itself, all in the one file rather than split across two) replace the old naive `dropna()`/`pd.get_dummies()` preprocessing; encoder/scaler pair (target encoding + standard scaling) chosen by an empirical grid over 15 repeated splits, checked against the runner-up with a paired comparison so the win isn't just noise; three redundant columns (found via correlation + VIF) dropped; `config.yaml` gains `diagnostics` and `preprocessing` sections -- see "Preprocessing decisions" below. Threshold-independent metrics (ROC-AUC/PR-AUC) and a calibration check are deliberately **not** added yet -- not yet |
 | 4 | Preprocessing inside the pipeline + cross-validation -- evaluating a model honestly | A **locked final test set** (20%, stratified, seed 42) is set aside by `split_dev_test()` (replaces `split_train_test()`) and never scored; models are now judged by **stratified 5-fold cross-validation** of the whole pipeline (preprocessing + model) on the development set, reported per fold with mean ± std and the train-validation gap; the classification report and fairness check now use out-of-fold predictions; target encoding switched to scikit-learn's cross-fitting `TargetEncoder` (a row's own label never leaks into its own encoding), encoder/scaler set by hand in `config.yaml` (target encoding + robust scaling, reasons in the comments); **two fixes** in `clean_dataset()`: genuine `NaN`s in categorical columns were being turned into the string `"nan"` (a fake category), so 229 `c_charge_degree` gaps were never imputed or flagged -- fixed in `config.yaml` alone: `"nan"` added to `diagnostics.placeholder_tokens` (the category cleanup's last step turns listed tokens into `NaN`, after its text conversion); and it no longer drops rows -- de-duplication moved to a separate, training-only `drop_duplicate_rows()` (run before the dev/test split), so the same cleaning can run on new data where every row needs a prediction; `src/data_diagnostics.py` removed -- its one cleaning function (`flag_invalid_values`) moved into `preprocessing.py`, and the EDA-only checks (missingness test, duplicate counts) live in the EDA notebooks, not in every pipeline run; `dummy` (majority-class) model added as the floor to beat, and `random_forest` registered (sensible defaults, untuned); the final model is refit on the whole development set after CV; `config.yaml` gains `test_set` and `cv` sections -- see "Model evaluation" below |
 | 5 | Hyperparameter tuning without leakage | New `src/tuning.py`: hyperparameters are tuned with **Optuna** (seeded TPE sampler) on the development set only -- every candidate is scored by stratified 5-fold CV of the **whole** pipeline (preprocessing re-fit in every fold of every trial), on the same folds for every candidate; the tuning procedure is estimated honestly by **nested cross-validation** (the tuning repeated inside each outer CV fold, scored on the outer fold it never saw), whose out-of-fold predictions now feed the classification report and fairness check; the reported "best trial" score is shown next to the nested one as an optimism check; the final model is the tuned pipeline refit on all development rows; `build_pipeline()` in `src/model.py` now builds the preprocessing + model `Pipeline` (one place to add a learned step later); `config.yaml` gains a `tuning` section (on/off, trials, inner folds, seed, one search space per model type) and the model becomes the decision tree; `optuna` added to `requirements.txt`. The locked test set is still untouched -- see "Hyperparameter tuning" below |
+| 6 | Ensembles in depth: random forest, oblique random forest, AdaBoost | Two new model types in `src/model.py`: `oblique_random_forest` (every tree splits on random linear combinations of the features, built from `SparseRandomProjection` inside `BaggingClassifier`) and `adaboost` (boosting over decision trees, stumps by default), both added to `_MODELS`; `config.yaml` gets a search space for each ensemble (forests: tree size and decorrelation, number of trees fixed; AdaBoost: base-tree depth, rounds, learning rate); `corrected_paired_test()` in `src/evaluate.py` compares two models scored on the same CV folds; `scipy` added to `requirements.txt` |
 
 ## Preprocessing decisions
 
@@ -69,6 +70,27 @@ This table is updated after each practical class, so you can always see what cha
 2. **Tuning on the whole development set** -- the same study, once, on every development row: these are the hyperparameters the final model uses.
 
 The best trial's score is printed too, but it is **optimistic** (the maximum of many noisy CV scores) -- report the nested one. Search spaces live in `config.yaml` under `tuning.search_spaces`, one per model type, keyed by Pipeline parameter name (`model__max_depth`); a model without a search space can't be tuned until you add one. Cost: `(cv.n_splits + 1) x n_trials x tuning.n_splits` fits.
+
+## Ensembles (week 6)
+
+Choose the model with `model.type` in `config.yaml`. Every type has a params example in the comments there and its own search space under `tuning.search_spaces`.
+
+| `model.type` | What it is | What the tuner chooses |
+|---|---|---|
+| `random_forest` | many trees on bootstrap samples, random features at each split, votes averaged | `max_depth`, `min_samples_leaf`, `max_features` |
+| `oblique_random_forest` | same idea, but each tree splits on random combinations of the features | tree `max_depth`, `min_samples_leaf`, `n_components` |
+| `adaboost` | shallow trees one after another, each focusing on what the last ones got wrong | base-tree depth, `n_estimators`, `learning_rate` |
+
+The number of trees in the forests is fixed in `params` (more trees don't overfit, they only take longer). Tuning an ensemble takes minutes, so lower `tuning.n_trials` or switch tuning off while testing.
+
+**Comparing two models.** All runs use the same CV folds, so the per-fold validation scores in two `results/` files can be compared directly:
+
+```python
+from src.evaluate import corrected_paired_test
+corrected_paired_test(scores_a, scores_b, test_train_ratio=1 / 4)   # 5 folds: 1 / (5 - 1)
+```
+
+It returns the mean difference, in how many folds model a wins, t and the p-value. With 5 folds only large differences come out significant, so a gap of about one point usually doesn't mean anything.
 
 ## Environment setup
 
