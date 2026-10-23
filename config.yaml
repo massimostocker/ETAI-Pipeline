@@ -13,8 +13,9 @@ cv:
   n_splits: 5
   shuffle: true
   random_state: 42
-  scoring: "accuracy"
-  #options: accuracy, balanced_accuracy, f1, roc_auc
+  # Reported for every run. fbeta_<beta> weights recall beta times as much as precision.
+  metrics: ["accuracy", "balanced_accuracy", "precision", "recall", "f1", "fbeta_2", "roc_auc", "average_precision"]
+  selection_metric: "roc_auc"                       # one of metrics: what tuning maximises and runs are ranked by
   n_jobs: 1                                         # -1 = all CPU cores
 
 diagnostics:
@@ -62,19 +63,20 @@ preprocessing:
     categorical_strategy: "most_frequent"
 
 model:
-  type: "adaboost"        # dummy | logistic_regression | decision_tree | random_forest | oblique_random_forest | adaboost
+  type: "decision_tree"        # dummy | logistic_regression | naive_bayes | decision_tree | random_forest | oblique_random_forest | adaboost | gradient_boosting | hist_gradient_boosting
   params:
     random_state: 42
-    max_depth: 3            
-    n_estimators: 200
-    learning_rate: 1
 
-# Params to swap in when changing model.type (ranges are what I use as sensible values):
+# Params to swap in when changing model.type (ranges are what I use as sensible values).
+# class_weight "balanced" weights each class by 1 / its frequency (GradientBoostingClassifier and GaussianNB have none).
 #
 # logistic_regression:   {max_iter: 2000}
 #   max_iter: 1000 ... 3000
 #   C: 0.01 ... 10                (smaller = stronger regularisation)
 #   class_weight: null | balanced
+#
+# naive_bayes:           {}
+#   var_smoothing: 1e-12 ... 0.1  (only tuned, no params to set)
 #
 # decision_tree:         {random_state: 42}
 #   max_depth: 3 ... 15
@@ -96,8 +98,17 @@ model:
 #   max_depth: 1 ... 8            (1 = stumps)
 #   n_estimators: 25 ... 400
 #   learning_rate: 0.01 ... 1.0
-
-
+#
+# gradient_boosting:     {random_state: 42}
+#   n_estimators: 100 ... 300
+#   learning_rate: 0.05 ... 0.2
+#   max_depth: 2 ... 4            (boosting wants shallow trees)
+#   subsample: 0.5 ... 1.0
+#
+# hist_gradient_boosting: {random_state: 42}      (class_weight: balanced works here)
+#   max_iter: 100 ... 300
+#   learning_rate: 0.05 ... 0.2
+#   max_leaf_nodes: 8 ... 31
 
 tuning:
   enabled: true
@@ -105,12 +116,12 @@ tuning:
   n_splits: 5                                       # folds that score each candidate
   random_state: 42                                  # seeds the sampler and those folds
   # Keys are Pipeline parameter names. Types: int / float (low, high, log) or categorical (choices).
+  # Ensembles take minutes per run: use a small n_trials while testing.
   search_spaces:
     decision_tree:
       model__max_depth: {type: int, low: 1, high: 20}
       model__min_samples_leaf: {type: int, low: 1, high: 200, log: true}
       model__criterion: {type: categorical, choices: ["gini", "entropy"]}
-    # ensembles take minutes per run, so use a small n_trials while testing
     random_forest:
       model__max_depth: {type: int, low: 2, high: 30}
       model__min_samples_leaf: {type: int, low: 1, high: 200, log: true}
@@ -118,14 +129,29 @@ tuning:
     oblique_random_forest:
       model__estimator__tree__max_depth: {type: int, low: 2, high: 30}
       model__estimator__tree__min_samples_leaf: {type: int, low: 1, high: 200, log: true}
-      model__estimator__project__n_components: {type: int, low: 3, high: 10}   # at most the number of features
+      model__estimator__project__n_components: {type: int, low: 3, high: 10}   # <= number of features
     adaboost:
       model__estimator__max_depth: {type: int, low: 1, high: 8}
       model__n_estimators: {type: int, low: 25, high: 400, log: true}
       model__learning_rate: {type: float, low: 0.01, high: 1.0, log: true}
+    gradient_boosting:
+      model__n_estimators: {type: int, low: 25, high: 500, log: true}
+      model__learning_rate: {type: float, low: 0.01, high: 0.5, log: true}
+      model__max_depth: {type: int, low: 1, high: 6}
+      model__min_samples_leaf: {type: int, low: 1, high: 200, log: true}
+      model__subsample: {type: float, low: 0.5, high: 1.0}
+    hist_gradient_boosting:
+      model__max_iter: {type: int, low: 25, high: 500, log: true}
+      model__learning_rate: {type: float, low: 0.01, high: 0.5, log: true}
+      model__max_leaf_nodes: {type: int, low: 2, high: 63, log: true}
+      model__min_samples_leaf: {type: int, low: 5, high: 200, log: true}
+      model__l2_regularization: {type: float, low: 0.000001, high: 10.0, log: true}
     # my own addition, not from the class repo
     logistic_regression:
       model__C: {type: float, low: 0.001, high: 100, log: true}
+    naive_bayes:
+      model__var_smoothing: {type: float, low: 0.000000000001, high: 0.1, log: true}
 
 output:
   results_dir: "results"
+  scoreboard: "results/runs.csv"                    # one row per run; delete it when the data, cleaning or folds change
