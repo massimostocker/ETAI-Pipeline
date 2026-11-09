@@ -18,7 +18,7 @@ Summary after week 7: the honest accuracy of nearly every model tried sits aroun
 ├── src/
 │   ├── data.py              # loading
 │   ├── preprocessing.py     # cleaning, imputation/encoding/scaling recipe, locked test set split (weeks 3-4)
-│   ├── model.py             # all the models + build_pipeline() = preprocessing + model in one estimator (weeks 5-7)
+│   ├── model.py             # all the models, the feature selector + build_pipeline() = preprocessing + selection + model in one estimator (weeks 5-8)
 │   ├── evaluate.py          # cross-validation, metrics, out-of-fold reports, fairness check, paired test (weeks 4-7)
 │   ├── tuning.py            # Optuna tuning + nested cross-validation (week 5)
 │   └── results.py           # saves the report of each run + the scoreboard row (week 7)
@@ -85,6 +85,28 @@ How to read the three tables of a tuned run: table 1 is one tree with fixed sett
 - **Scoreboard**: every `python main.py` adds a row to `results/runs.csv` with the model, its settings, the score on each fold, the no-model floor and the untuned score of the same model. That way I can compare any two runs with `corrected_paired_test()`.
 - The printed output is shorter now, the full tables go to the file in `results/`.
 - No new packages this week.
+
+### Week 8 -- XGBoost and feature selection
+
+- **XGBoost** added as a model (`xgboost` in `_MODELS`, needs `pip install xgboost`, and on a Mac `brew install libomp` if the import fails). It is the same boosting idea as last week, but it has extra brakes that act while each tree is being built: `gamma` (a split has to improve the loss by at least this much), `min_child_weight`, `reg_lambda` (L2) and `reg_alpha` (L1). Its defaults are aggressive (depth 6, learning rate 0.3), so I don't run it untuned. Search space for all of them is in `config.yaml`.
+- **Feature selection**, as a learned step in the pipeline. `VoteSelector` in `model.py` lets three models vote: a random forest and gradient boosting vote for features with above-average importance, an L1 logistic regression votes for features it doesn't shrink to zero. A feature stays if it gets at least `min_votes` of the three votes. Because it looks at the labels, it sits **inside** the pipeline between `prep` and `model`, so it is re-fitted on the training rows of every fold. If I selected on all the data first, I would leak, same trap as with every other learned step. It is switched on in the new `feature_selection` section of the config.
+- `min_votes` is a hyperparameter like any other. With tuning on it is added to the model's search space (`select__min_votes`), so nested CV gives the honest score for "tune the model *and* how much to select".
+- **Cache**: the selector fits three models every time, so tuning would refit it in every trial. `main.py` makes a temporary folder (`tempfile.mkdtemp`) and gives it to the pipeline as `memory`, so a step that was already fitted on the same rows with the same settings is reused. It changes the cost, not the result. The folder is deleted at the end of the run.
+- `main.py` prints which features the final model kept, the scoreboard has a `feature_selection` column, and the header of the file in `results/` shows the selection setting.
+- `xgboost` added to `requirements.txt`. The evaluation itself is unchanged: same folds, same metrics, ROC-AUC as the selection metric.
+
+**Experiment: does feature selection pay off?** I ran XGBoost tuned twice (15 trials, nested 5-fold CV, same folds), once with `feature_selection.enabled: true` and once with `false`.
+
+| | Selection on | Selection off |
+|---|---|---|
+| Features the final model uses | 2 of 10: `age`, `priors_count` | all 10 |
+| Untuned ROC-AUC | 0.721 ± 0.013 | 0.724 ± 0.017 |
+| Tuned, nested CV ROC-AUC | 0.725 ± 0.013 | 0.728 ± 0.013 |
+| Chosen `select__min_votes` | 1 | n/a |
+
+`corrected_paired_test()` on the five fold scores (selection off minus selection on): mean difference +0.003, ahead in 5 of 5 folds, t = 1.94, p = 0.124.
+
+So the smaller model is about as good. Using all ten features was ahead in every fold, but only by 0.0003 to 0.005, and with 5 folds the corrected test can't tell that apart from noise (p = 0.12). The selector kept only `age` and `priors_count`: no other feature got a single vote, which is why `min_votes` 1 and 2 give the same two features here and the choice of `min_votes` hardly matters. I read that as one more sign that the limit is the information in the data: almost everything the models can use sits in those two columns. If I had to explain the model to someone, or wanted it faster, I'd keep selection on, since it costs at most about 0.003 ROC-AUC. If I only cared about the highest score, I'd leave it off, because it was never behind, even though I can't prove the gain is real.
 
 ## What I tried myself (weeks 5-6)
 
@@ -165,6 +187,8 @@ corrected_paired_test(runs.loc[0, folds], runs.loc[1, folds], test_train_ratio=1
 | AdaBoost | 0.723 | 0.727 ± 0.015 | 0.500 |
 | Gradient boosting | 0.727 | 0.728 ± 0.015 | 0.500 |
 | HistGradientBoosting | 0.717 | 0.727 ± 0.016 | 0.500 |
+| XGBoost, no selection | 0.724 | 0.728 ± 0.013 | 0.500 |
+| XGBoost, selection on (2 features) | 0.721 | 0.725 ± 0.013 | 0.500 |
 
 (All numbers come from one run per model with 15 Optuna trials, nested 5-fold CV, in `results/runs.csv`. The tuned column is the nested CV score, mean ± std over the 5 outer folds.)
 
@@ -194,6 +218,7 @@ Set `model.type` in `config.yaml`. Each one has an example of its params in the 
 | `adaboost` | shallow trees in sequence, re-weighting the rows it got wrong | base-tree depth, `n_estimators`, `learning_rate` |
 | `gradient_boosting` | trees in sequence, each fitted to the gradient of the loss | `n_estimators`, `learning_rate`, `max_depth`, `min_samples_leaf`, `subsample` |
 | `hist_gradient_boosting` | same on binned features, faster, handles missing values | `max_iter`, `learning_rate`, `max_leaf_nodes`, `min_samples_leaf`, `l2_regularization` |
+| `xgboost` | boosting with extra brakes inside every split (`gamma`, `min_child_weight`, L1/L2) | `n_estimators`, `learning_rate`, `max_depth`, `min_child_weight`, `subsample`, `colsample_bytree`, `reg_lambda`, `reg_alpha`, `gamma` |
 
 Forests are about independent trees averaged (they fix variance, more trees never hurt). Boosting is about trees built one after another (it fixes bias, but more rounds *can* overfit, so rounds, learning rate and depth are tuned together).
 
