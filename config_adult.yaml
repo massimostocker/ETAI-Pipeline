@@ -1,0 +1,181 @@
+# Adult income (UCI Adult, 1994 US Census): does this person earn more than 50,000 USD a year?
+# Run:  python main.py config_adult.yaml
+data:
+  path: "data/adult_train.csv"
+  target: "income_over_50k"
+  sensitive_attr: "sex"                             # audited in the fairness report, never a feature
+  # id: identifier. fnlwgt: census sampling weight, not a trait of the person.
+  # race: the other sensitive attribute, kept out of the features too (see README, "Beyond COMPAS").
+  drop_columns: ["id", "fnlwgt", "race"]
+  # No existing score to compare with here, so there is no reference_score block.
+
+# Locked test set: never used to fit, tune or choose anything. Do not change once set.
+test_set:
+  size: 0.2
+  random_state: 42
+
+cv:
+  n_splits: 5
+  shuffle: true
+  random_state: 42
+  # Reported for every run. fbeta_<beta> weights recall beta times as much as precision.
+  metrics: ["accuracy", "balanced_accuracy", "precision", "recall", "f1", "fbeta_2", "roc_auc", "average_precision"]
+  selection_metric: "roc_auc"                       # one of metrics: what tuning maximises and runs are ranked by
+  n_jobs: 1                                         # -1 = all CPU cores
+
+diagnostics:
+  id_column: "id"
+  numeric_text_columns: []
+  # "?" is Adult's way of writing "unknown" (workclass, occupation, native_country). Placeholders in
+  # every text column become real missing values; "nan" catches NaNs turned into text.
+  placeholder_tokens: ["-", "?", "n/a", "N/A", "na", "NA", "", "nan"]
+  validity_rules:                                   # no violations today; they protect future data
+    age: {min: 16, max: 100}                        # 17-year-olds are valid here (COMPAS's min 18 would erase them)
+    hours_per_week: {min: 1, max: 99}
+    capital_gain: {min: 0}                          # 99999 is the census top code, a real value: no max
+    capital_loss: {min: 0}
+  canonical_categories: {}
+  redundant_columns: ["education"]                  # same information as education_num, which keeps the order
+
+preprocessing:
+  encoder: "target"                                 # onehot | ordinal | count | target  (target: selection then drops all 25 v columns)
+  scaler: "none"                                    # none | standard | minmax | robust
+  numeric_features: ["age", "education_num", "capital_gain", "capital_loss", "hours_per_week",
+                     "v01", "v02", "v03", "v04", "v05", "v06", "v07", "v08", "v09", "v10", "v11", "v12", "v13", "v14", "v15", "v16", "v17", "v18"]
+  categorical_features: ["workclass", "marital_status", "occupation", "relationship", "native_country",
+                         "v19", "v20", "v21", "v22", "v23", "v24", "v25"]
+  mnar_indicator_sources: ["workclass"]             # "?" in workclass and occupation are the same people: one flag
+  random_state: 42                                  # target encoder's internal folds
+  imputation:
+    numeric_strategy: "median"
+    categorical_strategy: "most_frequent"
+
+model:
+  type: "hist_gradient_boosting"        # dummy | logistic_regression | naive_bayes | decision_tree | random_forest | oblique_random_forest | adaboost | gradient_boosting | hist_gradient_boosting | xgboost
+  params:
+    {learning_rate: 0.05, max_iter: 300, max_depth: 3, random_state: 42}
+
+# Params to swap in when changing model.type (ranges are what I use as sensible values).
+# class_weight "balanced" weights each class by 1 / its frequency (GradientBoostingClassifier and GaussianNB have none).
+#
+# logistic_regression:   {max_iter: 2000}
+#   max_iter: 1000 ... 3000
+#   C: 0.01 ... 10                (smaller = stronger regularisation)
+#   class_weight: null | balanced
+#
+# naive_bayes:           {}
+#   var_smoothing: 1e-12 ... 0.1  (only tuned, no params to set)
+#
+# decision_tree:         {random_state: 42}
+#   max_depth: 3 ... 15
+#   min_samples_leaf: 20 ... 200
+#   criterion: gini | entropy
+#   class_weight: null | balanced
+#
+# random_forest:         {n_estimators: 200, random_state: 42, n_jobs: -1}
+#   n_estimators: 100 ... 400     (not tuned, more trees only cost time)
+#   max_depth: 5 ... 20
+#   min_samples_leaf: 5 ... 50
+#   max_features: sqrt | log2
+#   class_weight: null | balanced
+#
+# oblique_random_forest: {n_estimators: 200, n_components: 10, random_state: 42, n_jobs: -1}
+#   n_components: 3 ... 10        (random combinations of the features per tree)
+#
+# adaboost:              {max_depth: 1, n_estimators: 200, learning_rate: 1.0, random_state: 42}
+#   max_depth: 1 ... 8            (1 = stumps)
+#   n_estimators: 25 ... 400
+#   learning_rate: 0.01 ... 1.0
+#
+# gradient_boosting:     {random_state: 42}
+#   n_estimators: 100 ... 300
+#   learning_rate: 0.05 ... 0.2
+#   max_depth: 2 ... 4            (boosting wants shallow trees)
+#   subsample: 0.5 ... 1.0
+#
+# hist_gradient_boosting: {random_state: 42}      (class_weight: balanced works here)
+#   max_iter: 100 ... 300
+#   learning_rate: 0.05 ... 0.2
+#   max_leaf_nodes: 8 ... 31
+
+# xgboost:               {n_estimators: 300, learning_rate: 0.05, max_depth: 4, random_state: 42, n_jobs: -1}
+#   n_estimators: 100 ... 500
+#   learning_rate: 0.01 ... 0.2
+#   max_depth: 2 ... 6            (its default of 6 is aggressive)
+#   min_child_weight: 1 ... 20    (a leaf needs this much "weight"; raises the brake)
+#   gamma: 0 ... 5                (a split must improve the loss by at least this)
+#   reg_lambda: 0.1 ... 10        (L2: shrinks leaf values)   reg_alpha: 0.001 ... 10 (L1: zeroes weak leaves)
+#   subsample / colsample_bytree: 0.5 ... 1.0
+#   scale_pos_weight: about 1.2   (XGBoost's class_weight: negatives / positives)
+
+# Learned step between preprocessing and the model: keeps the features that at least
+# min_votes of three models (random forest, gradient boosting, L1 logistic regression) choose.
+feature_selection:
+  enabled: true
+  min_votes: 2                                      # 1 (keep almost all) .. 3 (keep only unanimous)
+  random_state: 42
+  search_space:                                     # tuned together with the model when tuning is on
+    select__min_votes: {type: int, low: 1, high: 3}
+
+tuning:
+  enabled: true
+  n_trials: 15
+  n_splits: 5                                       # folds that score each candidate
+  random_state: 42                                  # seeds the sampler and those folds
+  # Keys are Pipeline parameter names. Types: int / float (low, high, log) or categorical (choices).
+  # Ensembles take minutes per run: use a small n_trials while testing.
+  search_spaces:
+    decision_tree:
+      model__max_depth: {type: int, low: 1, high: 20}
+      model__min_samples_leaf: {type: int, low: 1, high: 200, log: true}
+      model__criterion: {type: categorical, choices: ["gini", "entropy"]}
+    random_forest:
+      model__max_depth: {type: int, low: 2, high: 30}
+      model__min_samples_leaf: {type: int, low: 1, high: 200, log: true}
+      model__max_features: {type: categorical, choices: ["sqrt", 0.5, 1.0]}
+    oblique_random_forest:
+      model__estimator__tree__max_depth: {type: int, low: 2, high: 30}
+      model__estimator__tree__min_samples_leaf: {type: int, low: 1, high: 200, log: true}
+      model__estimator__project__n_components: {type: int, low: 3, high: 10}   # <= number of features
+    adaboost:
+      model__estimator__max_depth: {type: int, low: 1, high: 8}
+      model__n_estimators: {type: int, low: 25, high: 400, log: true}
+      model__learning_rate: {type: float, low: 0.01, high: 1.0, log: true}
+    gradient_boosting:
+      model__n_estimators: {type: int, low: 25, high: 500, log: true}
+      model__learning_rate: {type: float, low: 0.01, high: 0.5, log: true}
+      model__max_depth: {type: int, low: 1, high: 6}
+      model__min_samples_leaf: {type: int, low: 1, high: 200, log: true}
+      model__subsample: {type: float, low: 0.5, high: 1.0}
+    hist_gradient_boosting:
+      model__max_iter: {type: int, low: 25, high: 500, log: true}
+      model__learning_rate: {type: float, low: 0.01, high: 0.5, log: true}
+      model__max_leaf_nodes: {type: int, low: 2, high: 63, log: true}
+      model__min_samples_leaf: {type: int, low: 5, high: 200, log: true}
+      model__l2_regularization: {type: float, low: 0.000001, high: 10.0, log: true}
+    # my own addition, not from the class repo
+    logistic_regression:
+      model__C: {type: float, low: 0.001, high: 100, log: true}
+    naive_bayes:
+      model__var_smoothing: {type: float, low: 0.000000000001, high: 0.1, log: true}
+    xgboost:
+      model__n_estimators: {type: int, low: 50, high: 600, log: true}
+      model__learning_rate: {type: float, low: 0.01, high: 0.3, log: true}
+      model__max_depth: {type: int, low: 1, high: 8}
+      model__min_child_weight: {type: float, low: 1.0, high: 50.0, log: true}
+      model__subsample: {type: float, low: 0.5, high: 1.0}
+      model__colsample_bytree: {type: float, low: 0.5, high: 1.0}
+      model__reg_lambda: {type: float, low: 0.01, high: 10.0, log: true}
+      model__reg_alpha: {type: float, low: 0.001, high: 10.0, log: true}
+      model__gamma: {type: float, low: 0.0, high: 5.0}
+
+output:
+  results_dir: "results_adult"
+  scoreboard: "results_adult/runs.csv"              # one row per run; delete it when the data, cleaning or folds change
+
+# Predict the people without a label with the final refit model; every row needs a prediction.
+predict:
+  path: "data/adult_new.csv"
+  id_column: "id"
+  threshold: 0.5
+  output: "predictions/adult_new_predictions.csv"

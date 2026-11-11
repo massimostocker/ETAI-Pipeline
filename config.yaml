@@ -1,8 +1,11 @@
 data:
   path: "data/compas_two_year_recidivism.csv"
   target: "two_year_recid"
-  sensitive_attr: "race"                            # never a feature; used only for the fairness report
+  sensitive_attr: "race"                            # never a feature; used only for the fairness report (delete the line to skip it)
   drop_columns: ["id", "decile_score", "score_text"]  # kept in the data, never used as features
+  # Optional: an existing score to audit next to the model in the fairness report (never a feature).
+  # A value outside negative_values counts as "predicted 1". Delete the block if there is none.
+  reference_score: {column: "score_text", negative_values: ["Low"], label: "COMPAS's own score"}
 
 # Locked test set: never used to fit, tune or choose anything. Do not change once set.
 test_set:
@@ -130,7 +133,7 @@ feature_selection:
     select__min_votes: {type: int, low: 1, high: 3}
 
 tuning:
-  enabled: true
+  enabled: false
   n_trials: 15
   n_splits: 5                                       # folds that score each candidate
   random_state: 42                                  # seeds the sampler and those folds

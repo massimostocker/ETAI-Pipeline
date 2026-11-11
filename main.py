@@ -1,13 +1,15 @@
 """
-Entry point: `python main.py`.
+Entry point: `python main.py` (COMPAS, config.yaml) or `python main.py config_adult.yaml` (any config file).
 
 load config -> load and clean data -> drop duplicate rows (training only) -> features/target
 -> lock the test set -> cross-validate the pipeline (preprocessing, feature selection if enabled,
 model) on the development set (several metrics, and the no-model floor on the same folds)
 -> [if tuning is enabled: nested CV of the tuning procedure, then tuning on all development rows]
--> out-of-fold reports -> refit on all development rows -> scoreboard + full report
+-> out-of-fold reports -> refit on all development rows -> [if the config has `predict`: predict the
+new rows] -> scoreboard + full report
 """
 import shutil
+import sys
 import tempfile
 from datetime import datetime
 
@@ -16,11 +18,13 @@ import yaml
 from sklearn.model_selection import StratifiedKFold
 
 from src.data import load_data
-from src.preprocessing import clean_dataset, drop_duplicate_rows, split_features_target, split_dev_test
+from src.preprocessing import (check_feature_lists, clean_dataset, drop_duplicate_rows, split_dev_test,
+                               split_features_target)
 from src.model import build_pipeline
 from src.evaluate import (build_scorers, cross_validate_pipeline, cv_report, oof_classification_report,
                           fairness_report)
 from src.tuning import tune_pipeline, nested_cross_validate, tuning_report
+from src.predict import predict_new_rows
 from src.results import save_run, save_scores
 
 
@@ -29,8 +33,8 @@ def load_config(path: str = "config.yaml") -> dict:
         return yaml.safe_load(f)
 
 
-def main():
-    config = load_config()
+def main(config_path: str = "config.yaml"):
+    config = load_config(config_path)
     run = datetime.now().strftime("%Y%m%d_%H%M%S")
     model_type = config["model"]["type"]
 
@@ -40,6 +44,10 @@ def main():
 
     mnar_sources = config["preprocessing"].get("mnar_indicator_sources", [])
     X, y, extras = split_features_target(df_clean, config["data"], mnar_sources)
+    unused = check_feature_lists(X, config["preprocessing"])
+    if unused:
+        print(f"Warning: {len(unused)} columns are in no feature list and are NOT used by the model: "
+              f"{', '.join(unused)}")
 
     # From here on, every decision uses the development set only; the test set stays locked.
     X_dev, X_test, y_dev, y_test, extras_dev, extras_test = split_dev_test(
@@ -57,6 +65,7 @@ def main():
     n_jobs = cv_config.get("n_jobs", 1)
     selection_config = config.get("feature_selection") or {}
     selection_enabled = selection_config.get("enabled", False)
+    print(f"Config: {config_path}   |   data: {config['data']['path']}")
     print(f"Model: {model_type}   |   selection metric: {selection_metric}   |   "
           f"{cv_config['n_splits']}-fold CV   |   feature selection: "
           f"{'min_votes ' + str(selection_config.get('min_votes', 2)) if selection_enabled else 'off'}")
@@ -117,7 +126,10 @@ def main():
     for name in metrics:
         print(f"  {name:<18s} {final_scores[name].mean():.3f} ± {final_scores[name].std(ddof=1):.3f}")
     report += "\n\n" + oof_classification_report(y_dev, oof_proba)
-    report += "\n" + fairness_report(y_dev, oof_proba, extras_dev, sensitive_attr=config["data"]["sensitive_attr"])
+    sensitive_attr = config["data"].get("sensitive_attr")
+    if sensitive_attr:
+        report += "\n" + fairness_report(y_dev, oof_proba, extras_dev, sensitive_attr=sensitive_attr,
+                                         reference_score=config["data"].get("reference_score"))
 
     pipeline.fit(X_dev, y_dev)
     refit = f"Final model: {model_type} refit on all {len(X_dev)} development rows."
@@ -126,6 +138,13 @@ def main():
         kept = pipeline.named_steps["select"].get_feature_names_out(all_features)
         refit += f"\nFeatures kept: {len(kept)} of {len(all_features)}: {', '.join(kept)}"
     report += "\n" + refit + "\n"
+
+    predict_config = config.get("predict")
+    if predict_config:
+        predictions = predict_new_rows(pipeline, predict_config, config["diagnostics"], config["data"], mnar_sources)
+        predicted = f"Predicted {len(predictions)} new rows from {predict_config['path']} -> {predict_config['output']}"
+        refit += f"\n{predicted}"
+        report += predicted + "\n"
 
     row = {"run": run, "data": config["data"]["path"], "model": model_type, "tuned": tuning_enabled,
            "encoder": config["preprocessing"]["encoder"], "scaler": config["preprocessing"]["scaler"],
@@ -149,4 +168,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    main(*sys.argv[1:2])

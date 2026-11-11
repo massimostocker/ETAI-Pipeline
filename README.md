@@ -12,8 +12,9 @@ Summary after week 7: the honest accuracy of nearly every model tried sits aroun
 
 ```
 .
-├── main.py                  # entry point: runs the whole pipeline
-├── config.yaml              # every setting lives here
+├── main.py                  # entry point: python main.py [config file] (default config.yaml)
+├── config.yaml              # every setting for the COMPAS run
+├── config_adult.yaml        # every setting for the Adult income run (week 9)
 ├── requirements.txt
 ├── src/
 │   ├── data.py              # loading
@@ -21,11 +22,16 @@ Summary after week 7: the honest accuracy of nearly every model tried sits aroun
 │   ├── model.py             # all the models, the feature selector + build_pipeline() = preprocessing + selection + model in one estimator (weeks 5-8)
 │   ├── evaluate.py          # cross-validation, metrics, out-of-fold reports, fairness check, paired test (weeks 4-7)
 │   ├── tuning.py            # Optuna tuning + nested cross-validation (week 5)
+│   ├── predict.py           # predicts rows that have no label with the final model (week 9)
 │   └── results.py           # saves the report of each run + the scoreboard row (week 7)
 ├── results/                 # made automatically: one report per run + runs.csv (not in git)
+├── results_adult/           # the same for the Adult runs (not in git)
+├── predictions/             # adult_new_predictions.csv: made by the Adult run, in git (week 9)
 └── data/
     ├── compas_two_year_recidivism.csv
-    └── README.md
+    ├── README.md
+    ├── adult_train.csv, adult_new.csv
+    └── ADULT_README.md
 ```
 
 ## Pipeline progress (week by week)
@@ -107,6 +113,10 @@ How to read the three tables of a tuned run: table 1 is one tree with fixed sett
 `corrected_paired_test()` on the five fold scores (selection off minus selection on): mean difference +0.003, ahead in 5 of 5 folds, t = 1.94, p = 0.124.
 
 So the smaller model is about as good. Using all ten features was ahead in every fold, but only by 0.0003 to 0.005, and with 5 folds the corrected test can't tell that apart from noise (p = 0.12). The selector kept only `age` and `priors_count`: no other feature got a single vote, which is why `min_votes` 1 and 2 give the same two features here and the choice of `min_votes` hardly matters. I read that as one more sign that the limit is the information in the data: almost everything the models can use sits in those two columns. If I had to explain the model to someone, or wanted it faster, I'd keep selection on, since it costs at most about 0.003 ROC-AUC. If I only cared about the highest score, I'd leave it off, because it was never behind, even though I can't prove the gain is real.
+
+### Week 9 -- beyond COMPAS
+
+No new technique this week: the task was to make the pipeline work on a different dataset (Adult income: does someone earn more than 50K a year?) without breaking COMPAS. What changed, in short: `main.py` takes a config file (`python main.py config_adult.yaml`), a new `config_adult.yaml`, and a few places in `src/` that quietly assumed COMPAS are now driven by the config. Details, the table of what broke and the results are in the section "Beyond COMPAS" below. No new packages.
 
 ## What I tried myself (weeks 5-6)
 
@@ -228,6 +238,47 @@ The nested CV ROC-AUC of the tuned models falls into three groups. Random forest
 
 So the models are not all tied: the five ensembles are, and the simpler ones are slightly worse. Among the five I would pick the simplest, since I can't claim any of them is better. I'd take the random forest, which has the fewest interacting settings to tune. The number to report for it is its nested CV score, 0.727 ± 0.016, never the best-trial score and never anything from the test set. The practical gain over logistic regression is about one point of ROC-AUC. If readability mattered more than that point, logistic regression would be a defensible choice, and I'd say so openly.
 
+## Beyond COMPAS (week 9)
+
+I picked option A, new data: the Adult income data (UCI Adult, 1994 US Census, 6,000 people to train on and 2,000 new people to predict). The question is the same kind as before (yes/no), so everything that broke was something that only worked for COMPAS. The COMPAS run is unchanged: the scores of the new code on the COMPAS settings are identical to the old code's (I compared the two on the same settings).
+
+**How to run it**
+```bash
+python main.py                      # COMPAS, reads config.yaml (as before)
+python main.py config_adult.yaml    # Adult, its own settings, its own results_adult/ folder
+```
+The Adult run also predicts the 2,000 new people and writes `predictions/adult_new_predictions.csv` (`id`, `probability`, `prediction`; 2,000 rows in, 2,000 rows out).
+
+**What broke, why, and how I fixed it**
+
+| What | Why it broke | The fix |
+|---|---|---|
+| `?` stayed in `workclass`, `occupation`, `native_country` as a category called "?" (379 rows in `workclass` still had it after cleaning) | the cleaning only turned placeholders into missing values in the columns listed in `canonical_categories` or `numeric_text_columns`. Nothing crashed, the model just saw "?" as a real category. The hardest one to find, because there was no error. | placeholders now become missing values in **every** text column (`_placeholders_to_nan`). Check: 379, 381 and 86 missing, no "?" left |
+| the fairness report crashed with `KeyError: 'score_text'` | `fairness_report` compared with `score_text`, COMPAS's own score, and `split_features_target` kept exactly that column as an "extra" | the existing score is now optional: `data.reference_score` (column, which values count as a negative, label) in `config.yaml`. Adult has none, so its report shows only our model. `sensitive_attr` is optional too |
+| columns could be silently left out of the model | `ColumnTransformer` ignores every column that is in no feature list, without a word | `check_feature_lists()` prints a warning with the columns that no list contains, and raises an error if a listed column is not in the data |
+| only `config.yaml` could be run | the file name was written into `main.py` | `main.py` takes the config file as an argument, default `config.yaml` |
+| no way to predict people without a label | the pipeline only ever scored the labelled rows | `src/predict.py` and a `predict` block in the config: same cleaning, but no de-duplication, because every row needs a prediction |
+| the validity rule `age >= 18` | it is COMPAS's rule and would turn Adult's 74 seventeen-year-olds into missing values | no code change: each dataset has its own `validity_rules` in its own config |
+| `split_dev_test` | `train_test_split` can't take `None` as the audit columns, which is what a data set without a sensitive attribute gives | handled: it splits only `X` and `y` when there is nothing to audit |
+
+**Decisions for Adult.** `id` is not a feature. `fnlwgt` is a census sampling weight, not a trait of a person, so it is dropped. `education` says the same as `education_num` (one to one), so I keep `education_num`, which has the order. The sensitive attributes are `sex` (the one audited in the fairness report) and `race`; I kept **both** out of the features. That is only a first step: `relationship` (husband, wife, ...) and `marital_status` still tell the model a lot about sex, and the selector keeps both of them. `workclass` and `occupation` are missing for exactly the same people, who earn over 50K only half as often, so the missingness carries information: one `workclass_was_missing` flag, plus the usual imputation. The 25 anonymous columns `v01`-`v25` stay in as features and the feature selection decides.
+
+**Results** (5-fold CV on the development set; `hist_gradient_boosting` with learning rate 0.05, 300 iterations, depth 3; tuning off). The targets are ROC-AUC >= 0.90, accuracy >= 0.855 and F1 >= 0.66.
+
+| Encoder | Feature selection | ROC-AUC | Accuracy | F1 | Features used |
+|---|---|---|---|---|---|
+| one-hot | off | 0.903 | 0.858 | 0.661 | all (148 columns) |
+| one-hot | on, `min_votes` 2 | 0.899 | 0.850 | 0.644 | 19 of 148, 11 of them `v` columns |
+| target | off | 0.905 | 0.857 | 0.663 | all (36 columns) |
+| **target** | **on, `min_votes` 2** | **0.910** | **0.861** | **0.673** | 8 of 36, no `v` column |
+| target | on, tuned (15 trials, nested CV) | 0.907 | 0.858 | 0.663 | 8 of 36, no `v` column |
+
+The tuned row is the honest nested-CV score (it is below the untuned 0.910 by 0.003, within one standard deviation, so tuning did not help here). All three targets are met by both the default and the tuned model; the no-model floor (always "<= 50K") is ROC-AUC 0.500.
+
+The false positive rate by sex (target encoder, selection on) is 0.02 for women and 0.08 for men. I did not look further than that.
+
+**What I learned.** The hardest assumption to find was the cleaning, because it didn't fail: `?` just became one more category, and only counting the missing values (379, 381, 86) showed it. The fairness report was easy by comparison: it crashed straight away with a `KeyError`. What got the scores over the targets was the feature selection, but only together with the target encoder: none of the 25 `v` columns helps (adding any one of them to the model on its own lowered the ROC-AUC), and with the target encoder the selector keeps none of them. With one-hot encoding the same selector kept 11, probably because 148 columns make the average importance, which is its threshold, very small, so a noise column can be above it. The selection is therefore only as good as the encoding in front of it. The target scores need no tuning here: the default model already reaches them.
+
 ## Environment setup
 
 You only need to do this once per machine.
@@ -299,10 +350,11 @@ If it still doesn't stick (common on locked-down school/lab machines with a Grou
 With the environment active (see above), from the project's root
 folder, on any OS:
 ```bash
-python main.py
+python main.py                      # COMPAS (config.yaml)
+python main.py config_adult.yaml    # Adult income (week 9); any other config file works the same way
 ```
 
-This loads `config.yaml`, cleans the data (week 3), locks the final test set away, cross-validates preprocessing + model on the development set (week 4), tunes the hyperparameters if `tuning.enabled` is on (week 5, minutes instead of seconds for the ensembles of week 6), and prints, in order:
+This loads `config.yaml` (or the config file you name), cleans the data (week 3), locks the final test set away, cross-validates preprocessing + model on the development set (week 4), tunes the hyperparameters if `tuning.enabled` is on (week 5, minutes instead of seconds for the ensembles of week 6), and prints, in order:
 - the model, the selection metric and the CV design, plus the size of the development set and of the locked test set (which is **not** used)
 - **default hyperparameters**: CV score on the selection metric, the train-validation gap and the no-model floor
 - with tuning on, **tuning**: the nested CV score (the honest one) and the chosen hyperparameters
@@ -337,4 +389,4 @@ Alternative: set up an SSH key once (`ssh-keygen -t ed25519`, then add the publi
 
 ## Dataset
 
-See `data/README.md`.
+COMPAS: see `data/README.md`. Adult income (week 9): see `data/ADULT_README.md`.

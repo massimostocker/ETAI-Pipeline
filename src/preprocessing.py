@@ -48,11 +48,24 @@ def _canonicalize_categories(df: pd.DataFrame, columns_and_maps: dict, placehold
     return out
 
 
+def _placeholders_to_nan(df: pd.DataFrame, placeholder_tokens: set) -> pd.DataFrame:
+    """Sets every text cell that is exactly a placeholder token (after stripping spaces) to NaN, in all text columns."""
+    out = df.copy()
+    tokens = list(placeholder_tokens)
+    for col in out.columns:
+        if pd.api.types.is_numeric_dtype(out[col]):
+            continue
+        is_placeholder = out[col].astype("string").str.strip().isin(tokens).fillna(False).to_numpy(dtype=bool)
+        out.loc[is_placeholder, col] = np.nan
+    return out
+
+
 def clean_dataset(df: pd.DataFrame, diagnostics_config: dict) -> pd.DataFrame:
     """
-    Applies the cleaning rules in `diagnostics_config`: placeholder tokens and domain-rule
-    violations become NaN, category spellings are canonicalized and redundant columns are
-    dropped. Row-preserving and target-agnostic, so it runs unchanged on data to predict.
+    Applies the cleaning rules in `diagnostics_config`: placeholder tokens (in every text
+    column) and domain-rule violations become NaN, category spellings are canonicalized and
+    redundant columns are dropped. Row-preserving and target-agnostic, so it runs unchanged
+    on data to predict.
     """
     out = df.copy()
     placeholder_tokens = set(diagnostics_config.get("placeholder_tokens", []))
@@ -61,6 +74,7 @@ def clean_dataset(df: pd.DataFrame, diagnostics_config: dict) -> pd.DataFrame:
         if col in out.columns:
             out[col] = pd.to_numeric(out[col].replace(list(placeholder_tokens), np.nan), errors="coerce")
 
+    out = _placeholders_to_nan(out, placeholder_tokens)
     flag_invalid_values(out, diagnostics_config.get("validity_rules", {}))
     out = _canonicalize_categories(out, diagnostics_config.get("canonical_categories", {}), placeholder_tokens)
 
@@ -90,22 +104,42 @@ def add_missingness_indicators(df: pd.DataFrame, mnar_indicator_sources: list) -
 
 def split_features_target(df: pd.DataFrame, data_config: dict, mnar_indicator_sources: list):
     """
-    Returns (X, y, extras). `extras` holds the columns kept out of the features for auditing
-    (the sensitive attribute and COMPAS's own score). On label-free data `y` is None.
+    Returns (X, y, extras). `extras` holds the columns kept out of the features for auditing:
+    the sensitive attribute (`data.sensitive_attr`) and an existing score to compare with
+    (`data.reference_score.column`), whichever the config names; None if it names neither.
+    On label-free data `y` is None.
     """
     target = data_config["target"]
-    sensitive_attr = data_config["sensitive_attr"]
+    sensitive_attr = data_config.get("sensitive_attr")
+    reference_column = (data_config.get("reference_score") or {}).get("column")
     drop_columns = data_config.get("drop_columns", [])
 
     df = add_missingness_indicators(df, mnar_indicator_sources)
     y = df[target] if target in df.columns else None
 
-    extras_cols = [c for c in [sensitive_attr, "score_text"] if c in df.columns]
+    audit_columns = [c for c in [sensitive_attr, reference_column] if c]
+    extras_cols = [c for c in audit_columns if c in df.columns]
     extras = df[extras_cols].copy() if extras_cols else None
 
-    always_drop = set(drop_columns) | {target, sensitive_attr}
+    always_drop = set(drop_columns) | set(audit_columns) | {target}
     feature_cols = [c for c in df.columns if c not in always_drop]
     return df[feature_cols], y, extras
+
+
+def check_feature_lists(X: pd.DataFrame, preprocessing_config: dict) -> list:
+    """
+    Compares the columns of X with the feature lists in `preprocessing_config`. A listed column
+    that is missing from X raises an error; a column of X that is in no list is silently left
+    out of the model by the ColumnTransformer, so it is returned for the caller to report.
+    """
+    indicators = [f"{c}_was_missing" for c in preprocessing_config.get("mnar_indicator_sources", [])]
+    listed = (list(preprocessing_config["numeric_features"]) + list(preprocessing_config["categorical_features"])
+              + indicators)
+    missing = [c for c in listed if c not in X.columns]
+    if missing:
+        raise ValueError(f"preprocessing lists columns that are not in the data after cleaning: {missing}. "
+                         "Check numeric_features, categorical_features and mnar_indicator_sources.")
+    return [c for c in X.columns if c not in listed]
 
 
 _SCALERS = {"none": "passthrough", "standard": StandardScaler, "minmax": MinMaxScaler, "robust": RobustScaler}
@@ -150,6 +184,10 @@ def split_dev_test(X, y, extras, test_size: float, random_state: int):
     """
     Stratified split into a development set, used for every decision, and a locked test set,
     used only for the final assessment. Returns X_dev, X_test, y_dev, y_test, extras_dev,
-    extras_test, row-aligned.
+    extras_test, row-aligned (extras may be None: both come back None).
     """
+    if extras is None:
+        X_dev, X_test, y_dev, y_test = train_test_split(X, y, test_size=test_size, random_state=random_state,
+                                                        stratify=y)
+        return X_dev, X_test, y_dev, y_test, None, None
     return train_test_split(X, y, extras, test_size=test_size, random_state=random_state, stratify=y)
